@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hay Ride Audio Tour</title>
+</head>
+<body>
+
+    <header>
+        <h2>Hay Ride Audio Tour</h2>
+    </header>
+
+    <div class="button">
+        <button id="startBtn">Start Tour</button>
+        <button id="stopBtn" disabled>Pause</button>
+    </div>
+
+    <div>
+        <p id="statusText">Tour not started</p>
+        <p id="gpsInfo">GPS: waiting...</p>
+    </div>
+
+    <ul id="stopList">
+        <li data-index="0">Checkpoint 1</li>
+        <li data-index="1">Checkpoint 2</li>
+        <li data-index="2">Checkpoint 3</li>
+        <li data-index="3">Checkpoint 4</li>
+        <li data-index="4">Checkpoint 5</li>
+    </ul>
+
+    <div id="manual">
+        <h2>Manual Controls</h2>
+        <button onclick="manualPlay(0)" class="manualBtn">Checkpoint 1</button>
+        <button onclick="manualPlay(1)" class="manualBtn">Checkpoint 2</button>
+        <button onclick="manualPlay(2)" class="manualBtn">Checkpoint 3</button>
+        <button onclick="manualPlay(3)" class="manualBtn">Checkpoint 4</button>
+        <button onclick="manualPlay(4)" class="manualBtn">Checkpoint 5</button>
+    </div>
+
+    <div>
+        <img src="farmlogo.png" alt="farm logo">
+    </div>
+
+<style>
+    * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        justify-items: center;
+        align-content: center;
+    }
+
+    body {
+        display: grid;
+        grid-template-rows: 1fr 1fr 1fr 1.5fr 4fr;
+        max-width: 350px;
+        margin: 0 auto;
+        font-family: 'Trebuchet MS', 'Lucida Sans Unicode', 'Lucida Grande', 'Lucida Sans', Arial, sans-serif;
+    }
+
+    header {
+        font-size: 20px;
+    }
+    
+    button {
+        height: 50px;
+        width: 150px;
+        border-radius: 30px;
+        box-shadow: 2px 2px 3px rgb(172, 162, 162);
+        margin: 5px 5px 5px 5px;
+        color: white;
+        font-family: 'Trebuchet MS', 'Lucida Sans Unicode', 'Lucida Grande', 'Lucida Sans', Arial, sans-serif;
+    }
+
+    #startBtn {
+        background-color: green;
+    }
+
+    #stopBtn {
+        background-color: red;
+    }
+
+    #manual {
+        font-size: 18px;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+    div button {
+        background-color: rgb(81, 132, 251);
+    }
+
+</style>
+<script>
+
+    // ── Config ────────────────────────────────────────────────────────────────
+
+    const RANGE = 15; // meters
+
+    const backgroundTrack = new Audio("audios/background.mp3");
+    backgroundTrack.loop = true;
+
+    const stops = [
+        { name: "Checkpoint 1", lat: 39.62809530652008, lon: -119.70757487812645, radius: RANGE, audio: new Audio("audios/audio1.mp3"), played: false }, // 43.816943014623455, -111.78657793572535
+        { name: "Checkpoint 2", lat: 39.62865441123493, lon: -119.70675133818253, radius: RANGE, audio: new Audio("audios/audio2.mp3"), played: false }, // 43.81761265635099, -111.78586442868259
+        { name: "Checkpoint 3", lat: 39.62858739198887, lon: -119.70485263495284, radius: RANGE, audio: new Audio("audios/audio3.mp3"), played: false }, // 43.8175802545048, -111.78400332289976
+        { name: "Checkpoint 4", lat: 39.62750358641795, lon: -119.70522268143958, radius: RANGE, audio: new Audio("audios/audio4.mp3"), played: false }, // 43.8165685880185, -111.78415799925168
+        { name: "Checkpoint 5", lat: 39.627504455829424, lon: -119.7069336152131, radius: RANGE, audio: new Audio("audios/audio5.mp3"), played: false }, // 43.8165829890852, -111.78569478365145
+    ];
+
+    // ── State ─────────────────────────────────────────────────────────────────
+
+    let watchID = null;
+    let currentStopAudio = null;
+    let isPlayingStop = false;   // prevents a new stop interrupting a playing one
+    let awaitingReset = false;   // true after all stops played, waiting for tractor to clear all zones
+
+    // ── UI helpers ────────────────────────────────────────────────────────────
+
+    function setStatus(msg) {
+        document.getElementById('statusText').textContent = msg;
+    }
+
+    function updateStopUI(index, state) {
+        // state: '' | 'active' | 'done'
+        const li = document.querySelector(`#stopList li[data-index="${index}"]`);
+        if (li) li.className = state;
+    }
+
+    function refreshAllStopUI() {
+        stops.forEach((stop, i) => updateStopUI(i, stop.played ? 'done' : ''));
+    }
+
+    // ── Tour control ──────────────────────────────────────────────────────────
+
+    document.getElementById('startBtn').addEventListener('click', startTour);
+    document.getElementById('stopBtn').addEventListener('click', pauseTour);
+
+    function startTour() {
+        if (!navigator.geolocation) {
+            alert("Location services not available on this device.");
+            return;
+        }
+
+        backgroundTrack.play();
+        setStatus("Background music playing...");
+
+        document.getElementById('startBtn').disabled = true;
+        document.getElementById('stopBtn').disabled = false;
+
+        watchID = navigator.geolocation.watchPosition(
+            onLocationUpdate,
+            onLocationError,
+            { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 }
+        );
+
+        console.log("Tour started");
+    }
+
+    function pauseTour() {
+        if (watchID !== null) {
+            navigator.geolocation.clearWatch(watchID);
+            watchID = null;
+        }
+        backgroundTrack.pause();
+        if (currentStopAudio) {
+            currentStopAudio.pause();
+            currentStopAudio.currentTime = 0;
+            currentStopAudio = null;
+        }
+        isPlayingStop = false;
+
+        setStatus("Tour paused");
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('stopBtn').disabled = true;
+    }
+
+    // ── Location callbacks ────────────────────────────────────────────────────
+
+    function onLocationUpdate(position) {
+        const lat = position.coords.latitude;
+        const lon = position.coords.longitude;
+        const acc = position.coords.accuracy;
+
+        document.getElementById('gpsInfo').textContent =
+            `GPS: ${lat.toFixed(6)}, ${lon.toFixed(6)}  ±${Math.round(acc)}m`;
+
+        if (awaitingReset) {
+            // Wait until tractor has left ALL stop zones, then reset for next loop
+            const nearAny = stops.some(s => getDistance(lat, lon, s.lat, s.lon) <= s.radius);
+            if (!nearAny) {
+                resetLoop();
+            }
+        } else {
+            checkStops(lat, lon);
+        }
+    }
+
+    function onLocationError(err) {
+        console.warn("GPS error:", err.message);
+        setStatus("GPS error – retrying...");
+    }
+
+    // ── Stop checking ─────────────────────────────────────────────────────────
+
+    function checkStops(lat, lon) {
+        if (isPlayingStop) return; // don't interrupt a playing stop
+
+        for (let i = 0; i < stops.length; i++) {
+            const stop = stops[i];
+            if (stop.played) continue;
+
+            const dist = getDistance(lat, lon, stop.lat, stop.lon);
+            if (dist <= stop.radius) {
+                playStop(stop, i);
+                return; // only trigger one stop at a time
+            }
+        }
+
+        // Check if every stop has been played → enter reset-wait mode
+        if (stops.every(s => s.played)) {
+            awaitingReset = true;
+            setStatus("Loop complete – resetting...");
+        }
+    }
+
+    // ── Audio playback ────────────────────────────────────────────────────────
+
+    function playStop(stop, index) {
+        stop.played = true;
+        isPlayingStop = true;
+
+        backgroundTrack.pause();
+
+        if (currentStopAudio) {
+            currentStopAudio.pause();
+            currentStopAudio.currentTime = 0;
+        }
+
+        currentStopAudio = stop.audio;
+        currentStopAudio.currentTime = 0;
+        currentStopAudio.play();
+
+        setStatus(`Playing: ${stop.name}`);
+        updateStopUI(index, 'active');
+        console.log("Playing:", stop.name);
+
+        currentStopAudio.onended = () => {
+            currentStopAudio = null;
+            isPlayingStop = false;
+            updateStopUI(index, 'done');
+            backgroundTrack.play();
+            setStatus("Background music playing...");
+            console.log(stop.name, "finished");
+        };
+    }
+
+    // ── Loop reset ────────────────────────────────────────────────────────────
+
+    function resetLoop() {
+        stops.forEach(s => { s.played = false; });
+        awaitingReset = false;
+        refreshAllStopUI();
+        setStatus("New loop – listening...");
+        console.log("Loop reset – ready for next lap");
+    }
+
+    // ── Manual trigger (for testing / operator use) ───────────────────────────
+
+    function manualPlay(index) {
+        if (isPlayingStop) {
+            if (currentStopAudio) {
+                currentStopAudio.pause();
+                currentStopAudio.currentTime = 0;
+                currentStopAudio = null;
+            }
+            isPlayingStop = false;
+        }
+        playStop(stops[index], index);
+    }
+
+    // ── Haversine distance (metres) ───────────────────────────────────────────
+
+    function getDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371000;
+        const toRad = deg => deg * Math.PI / 180;
+
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+
+        const a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+    }
+
+</script>
+</body>
+</html>

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+    <header>Hay Ride Audio Tour</header>
+    <div class="button">
+        <button>Start Tour</button>
+        <button>End/Pause Tour</button>
+    </div>
+    <div>
+        <button>Manual Controls</button>
+    </div>
+</body>
+
+<script>
+
+//Setup
+    const range = 30;
+
+    const backgroundTrack = new Audio("audios/background.mp3")
+    backgroundTrack.loop = true;
+
+    const stops = [
+        {
+            name: "Stop 1",
+            lat: 39.627630,
+            lon: -119.707566,
+            radius: range,
+            audio: new Audio("audios/stop1.mp3"),
+            played: false
+        },
+        {
+            name: "Stop 2",
+            lat: 39.627630,
+            lon: -119.707566,
+            radius: range,
+            audio: new Audio("audios/stop2.mp3"),
+            played: false
+        },
+        {
+            name: "Stop 3",
+            lat: 39.627630,
+            lon: -119.707566,
+            radius: range,
+            audio: new Audio("audios/stop3.mp3"),
+            played: false
+        },
+        {
+            name: "Stop 4",
+            lat: 39.627630,
+            lon: -119.707566,
+            radius: range,
+            audio: new Audio("audios/stop4.mp3"),
+            played: false
+        },
+        {
+            name: "Stop 5",
+            lat: 39.627630,
+            lon: -119.707566,
+            radius: range,
+            audio: new Audio("audios/stop5.mp3"),
+            played: false
+        }
+    
+    ];
+
+    let watchID = null;
+
+//Start
+
+    function startTour() {
+
+        backgroundTrack.play();
+
+        if (!navigator.geolocation) {
+            alert("Location services not available");
+            return;
+        }
+
+        watchID = navigator.geolocation.watchPosition(
+            onLocationUpdate,
+            onLocationError,
+            {
+                enableHighAccuracy: true,
+                maximumAge: 2000,
+                timeout: 10000
+            }
+        );
+
+        console.log("Tour started");
+    }
+
+// Updates
+
+    function onLocationUpdate(position) {
+        const currentLat = position.coords.latitude;
+        const currentLon = position.coords.longitude;
+
+        checkStops(currentLat, currentLon);
+    }
+
+// check distance
+
+    function checkStops(lat, lon) {
+        let allPlayed = true;
+
+        stops.forEach(stop => {
+            // if (stop.played) return; // VERIFY is that what we want to do?
+            const distance = getDistance(lat, lon, stop.lat, stop.lon);
+
+            if (!stop.played && distance <= stop.radius) {
+                playStop(stop)
+            }
+
+            if (!stop.played) {
+                allPlayed = false;
+            }
+        });
+
+        if (allPlayed) {
+            resetStopsWhenAway(lat,lon); // Won't work cause it's not away?
+        }
+    }
+
+//Play Audio
+
+    let currentStopAudio = null;
+
+    function playStop(stop) {
+        stop.played = true;
+
+        backgroundTrack.pause();
+
+        if (currentStopAudio) {
+            currentStopAudio.pause();
+            currentStopAudio.currentTime = 0;
+        }
+        
+        currentStopAudio = stop.audio;
+
+        currentStop.audio.play();
+        console.log("Playing:", stop.name);
+
+        stop.audio.onended = () => {
+            currentStopAudio = null;
+            backgroundTrack.play();
+        };
+    }
+
+// distance formula
+
+    function getDistance(lat1,lon1,lat2,lon2) {
+        const R = 6371000;
+        const toRad = deg => deg * Math.PI / 180;
+
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+
+        const a =
+        Math.sin(dLate / 2) * Math.sin(dLat / 2) +
+        Math.sin(toRad(lat1)) *
+        Math.cos(toRad(lat1)) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+        return R * c;
+    }
+
+</script>
+</html>
