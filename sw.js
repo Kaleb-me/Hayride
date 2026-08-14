@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hayride-tour-v1';
+const CACHE_NAME = 'hayride-tour-v2';
 
 const PRECACHE_URLS = [
   './',
