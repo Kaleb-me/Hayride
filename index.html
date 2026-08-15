@@ -94,20 +94,17 @@
 </style>
 <script>
 
-    if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('./sw.js')
-                .then((reg) => console.log('Service worker registered:', reg.scope))
-                .catch((err) => console.error('Service worker registration failed:', err));
-        });
-    }
-
     // ── Config ────────────────────────────────────────────────────────────────
 
     const RANGE = 15; // meters
 
+    const NORMAL_VOLUME = 1.0;   // background volume when no stop is playing
+    const DUCK_VOLUME = 0.15;    // background volume while a checkpoint plays
+    const FADE_MS = 600;         // fade duration in milliseconds
+
     const backgroundTrack = new Audio("audios/background.mp3");
     backgroundTrack.loop = true;
+    backgroundTrack.volume = NORMAL_VOLUME;
 
     const stops = [
         { name: "Checkpoint 1", lat: 39.62809530652008, lon: -119.70757487812645, radius: RANGE, audio: new Audio("audios/audio1.mp3"), played: false }, // 43.816943014623455, -111.78657793572535
@@ -140,6 +137,56 @@
         stops.forEach((stop, i) => updateStopUI(i, stop.played ? 'done' : ''));
     }
 
+    // ── Audio unlock (required by iOS/Android autoplay policies) ────────────────
+    //
+    // Mobile browsers only allow .play() to be called programmatically (e.g. from
+    // a GPS callback) if the audio element was already "unlocked" by a direct user
+    // gesture earlier. We prime every Audio() object here, inside the Start Tour
+    // click handler, so later GPS-triggered playback isn't blocked.
+
+    function unlockAudio() {
+        const allAudio = [backgroundTrack, ...stops.map(s => s.audio)];
+        allAudio.forEach(audio => {
+            const previousVolume = audio.volume;
+            audio.volume = 0; // silent priming, avoid an audible blip
+            audio.play().then(() => {
+                audio.pause();
+                audio.currentTime = 0;
+                audio.volume = previousVolume;
+            }).catch(() => {
+                // Some browsers reject the priming call itself — the unlock often
+                // still registers for the later real play() call, so we just
+                // restore volume and move on.
+                audio.volume = previousVolume;
+            });
+        });
+    }
+
+    // ── Background music fade / ducking ─────────────────────────────────────────
+
+    function fadeVolume(audio, targetVolume, duration) {
+        const startVolume = audio.volume;
+        const startTime = performance.now();
+
+        function step(now) {
+            const elapsed = now - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+            audio.volume = startVolume + (targetVolume - startVolume) * progress;
+            if (progress < 1) {
+                requestAnimationFrame(step);
+            }
+        }
+        requestAnimationFrame(step);
+    }
+
+    function duckBackground() {
+        fadeVolume(backgroundTrack, DUCK_VOLUME, FADE_MS);
+    }
+
+    function restoreBackground() {
+        fadeVolume(backgroundTrack, NORMAL_VOLUME, FADE_MS);
+    }
+
     // ── Tour control ──────────────────────────────────────────────────────────
 
     document.getElementById('startBtn').addEventListener('click', startTour);
@@ -151,7 +198,14 @@
             return;
         }
 
-        backgroundTrack.play();
+        // Must happen inside this click handler (a real user gesture) so that
+        // later programmatic play() calls from the GPS callback aren't blocked.
+        unlockAudio();
+
+        backgroundTrack.volume = NORMAL_VOLUME;
+        backgroundTrack.play().catch(err => {
+            console.error("Background playback blocked:", err);
+        });
         setStatus("Background music playing...");
 
         document.getElementById('startBtn').disabled = true;
@@ -239,7 +293,9 @@
         stop.played = true;
         isPlayingStop = true;
 
-        backgroundTrack.pause();
+        // Duck the background music instead of stopping it — it keeps playing
+        // quietly underneath the checkpoint audio.
+        duckBackground();
 
         if (currentStopAudio) {
             currentStopAudio.pause();
@@ -248,7 +304,13 @@
 
         currentStopAudio = stop.audio;
         currentStopAudio.currentTime = 0;
-        currentStopAudio.play();
+
+        currentStopAudio.play().catch(err => {
+            console.error("Checkpoint playback blocked:", err);
+            setStatus(`Couldn't play ${stop.name} – try the manual button`);
+            isPlayingStop = false;
+            restoreBackground();
+        });
 
         setStatus(`Playing: ${stop.name}`);
         updateStopUI(index, 'active');
@@ -258,7 +320,7 @@
             currentStopAudio = null;
             isPlayingStop = false;
             updateStopUI(index, 'done');
-            backgroundTrack.play();
+            restoreBackground();
             setStatus("Background music playing...");
             console.log(stop.name, "finished");
         };
@@ -288,7 +350,7 @@
         playStop(stops[index], index);
     }
 
-    // ── Haversine distance (metres) ───────────────────────────────────────────
+    // ── Haversine distance (meters) ───────────────────────────────────────────
 
     function getDistance(lat1, lon1, lat2, lon2) {
         const R = 6371000;
@@ -304,6 +366,16 @@
 
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         return R * c;
+    }
+
+    // ── Service worker registration (offline support) ───────────────────────
+
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('./sw.js')
+                .then((reg) => console.log('Service worker registered:', reg.scope))
+                .catch((err) => console.error('Service worker registration failed:', err));
+        });
     }
 
 </script>
