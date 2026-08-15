@@ -40,7 +40,7 @@
 
     <div>
         <img src="farmlogo.png" alt="farm logo">
-        <p>&copy;Kaleb Andelin 2026 v2.1</p>
+        <p>&copy;Kaleb Andelin 2026 v2.2 </p>
     </div>
 
 <style>
@@ -97,7 +97,7 @@
 
     // ── Config ────────────────────────────────────────────────────────────────
 
-    const RANGE = 15; // meters
+    const RANGE = 10; // meters
 
     const NORMAL_VOLUME = 1.0;   // background volume when no stop is playing
     const DUCK_VOLUME = 0.15;    // background volume while a checkpoint plays
@@ -120,7 +120,6 @@
     let watchID = null;
     let currentStopAudio = null;
     let isPlayingStop = false;   // prevents a new stop interrupting a playing one
-    let awaitingReset = false;   // true after all stops played, waiting for tractor to clear all zones
 
     // ── UI helpers ────────────────────────────────────────────────────────────
 
@@ -134,10 +133,6 @@
         if (li) li.className = state;
     }
 
-    function refreshAllStopUI() {
-        stops.forEach((stop, i) => updateStopUI(i, stop.played ? 'done' : ''));
-    }
-
     // ── Audio unlock (required by iOS/Android autoplay policies) ────────────────
     //
     // Mobile browsers only allow .play() to be called programmatically (e.g. from
@@ -148,18 +143,17 @@
     function unlockAudio() {
         const allAudio = [backgroundTrack, ...stops.map(s => s.audio)];
         allAudio.forEach(audio => {
-            const previousVolume = audio.volume;
-            audio.volume = 0; // silent priming, avoid an audible blip
-            audio.play().then(() => {
-                audio.pause();
-                audio.currentTime = 0;
-                audio.volume = previousVolume;
-            }).catch(() => {
-                // Some browsers reject the priming call itself — the unlock often
-                // still registers for the later real play() call, so we just
-                // restore volume and move on.
-                audio.volume = previousVolume;
+            // IMPORTANT: pause() must be called synchronously, in the same tick as
+            // play() — NOT inside a .then() callback. Waiting for the promise to
+            // resolve introduced a race condition where the pause fired late and
+            // stopped real playback that had started in the meantime (this was
+            // causing the "everything plays at once" / "background dies after a
+            // checkpoint" bugs).
+            audio.play().catch(() => {
+                // Ignore rejections here — this call is only for unlocking.
             });
+            audio.pause();
+            audio.currentTime = 0;
         });
     }
 
@@ -249,15 +243,7 @@
         document.getElementById('gpsInfo').textContent =
             `GPS: ${lat.toFixed(6)}, ${lon.toFixed(6)}  ±${Math.round(acc)}m`;
 
-        if (awaitingReset) {
-            // Wait until tractor has left ALL stop zones, then reset for next loop
-            const nearAny = stops.some(s => getDistance(lat, lon, s.lat, s.lon) <= s.radius);
-            if (!nearAny) {
-                resetLoop();
-            }
-        } else {
-            checkStops(lat, lon);
-        }
+        checkStops(lat, lon);
     }
 
     function onLocationError(err) {
@@ -268,7 +254,20 @@
     // ── Stop checking ─────────────────────────────────────────────────────────
 
     function checkStops(lat, lon) {
-        if (isPlayingStop) return; // don't interrupt a playing stop
+        if (isPlayingStop) return; // don't interfere while a stop is actively playing
+
+        // Re-arm any stop the tractor has fully left, so it can trigger again on
+        // the next loop. This is done per-stop and independently of the others,
+        // so missing one checkpoint on a given loop has no effect on the rest.
+        stops.forEach((stop, i) => {
+            if (stop.played) {
+                const dist = getDistance(lat, lon, stop.lat, stop.lon);
+                if (dist > stop.radius) {
+                    stop.played = false;
+                    updateStopUI(i, '');
+                }
+            }
+        });
 
         for (let i = 0; i < stops.length; i++) {
             const stop = stops[i];
@@ -279,12 +278,6 @@
                 playStop(stop, i);
                 return; // only trigger one stop at a time
             }
-        }
-
-        // Check if every stop has been played → enter reset-wait mode
-        if (stops.every(s => s.played)) {
-            awaitingReset = true;
-            setStatus("Loop complete – resetting...");
         }
     }
 
@@ -327,16 +320,6 @@
         };
     }
 
-    // ── Loop reset ────────────────────────────────────────────────────────────
-
-    function resetLoop() {
-        stops.forEach(s => { s.played = false; });
-        awaitingReset = false;
-        refreshAllStopUI();
-        setStatus("New loop – listening...");
-        console.log("Loop reset – ready for next lap");
-    }
-
     // ── Manual trigger (for testing / operator use) ───────────────────────────
 
     function manualPlay(index) {
@@ -351,7 +334,7 @@
         playStop(stops[index], index);
     }
 
-    // ── Haversine distance (meters) ───────────────────────────────────────────
+    // ── Haversine distance (metres) ───────────────────────────────────────────
 
     function getDistance(lat1, lon1, lat2, lon2) {
         const R = 6371000;
