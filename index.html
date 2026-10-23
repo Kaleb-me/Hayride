@@ -95,243 +95,219 @@
 </style>
 <script>
 
-    // ── Config ────────────────────────────────────────────────────────────────
+    const RANGE = 15; // meters; checkpoint coordinates and trigger radii are unchanged
+    const REARM_MARGIN = 10; // avoid repeating a stop due to GPS drift at its boundary
+    const BACKGROUND_SRC = "audios/background.mp3";
 
-    const RANGE = 15; // meters
-
-    const NORMAL_VOLUME = 1.0;   // background volume when no stop is playing
-    const DUCK_VOLUME = 0.15;    // background volume while a checkpoint plays
-    const FADE_MS = 600;         // fade duration in milliseconds
-
-    const backgroundTrack = new Audio("audios/background.mp3");
-    backgroundTrack.loop = true;
-    backgroundTrack.volume = NORMAL_VOLUME;
+    // Safari grants playback permission per element. Start real playback on the
+    // user's tap, then reuse this same player for every source on every loop.
+    const tourAudio = new Audio();
+    tourAudio.preload = 'auto';
 
     const stops = [
-        { name: "Checkpoint 1", lat: 39.62801965243971, lon: -119.70757443535256, radius: RANGE, audio: new Audio("audios/audio1.mp3"), played: false }, // 43.816943014623455, -111.78657793572535
-        { name: "Checkpoint 2", lat: 39.62865441123493, lon: -119.70675133818253, radius: RANGE, audio: new Audio("audios/audio2.mp3"), played: false }, // 43.81761265635099, -111.78586442868259
-        { name: "Checkpoint 3", lat: 39.62858739198887, lon: -119.70485263495284, radius: RANGE, audio: new Audio("audios/audio3.mp3"), played: false }, // 43.8175802545048, -111.78400332289976
-        { name: "Checkpoint 4", lat: 39.627513870044666, lon: -119.70571186680904, radius: RANGE, audio: new Audio("audios/audio4.mp3"), played: false }, // 43.8165685880185, -111.78415799925168
-        { name: "Checkpoint 5", lat: 39.62749917025503, lon: -119.70713034177358, radius: RANGE, audio: new Audio("audios/audio5.mp3"), played: false }, // 43.8165829890852, -111.78569478365145
+        { name: "Checkpoint 1", lat: 39.62801965243971, lon: -119.70757443535256, radius: RANGE, src: "audios/audio1.mp3", played: false }, // 43.816943014623455, -111.78657793572535
+        { name: "Checkpoint 2", lat: 39.62865441123493, lon: -119.70675133818253, radius: RANGE, src: "audios/audio2.mp3", played: false }, // 43.81761265635099, -111.78586442868259
+        { name: "Checkpoint 3", lat: 39.62858739198887, lon: -119.70485263495284, radius: RANGE, src: "audios/audio3.mp3", played: false }, // 43.8175802545048, -111.78400332289976
+        { name: "Checkpoint 4", lat: 39.627513870044666, lon: -119.70571186680904, radius: RANGE, src: "audios/audio4.mp3", played: false }, // 43.8165685880185, -111.78415799925168
+        { name: "Checkpoint 5", lat: 39.62749917025503, lon: -119.70713034177358, radius: RANGE, src: "audios/audio5.mp3", played: false }, // 43.8165829890852, -111.78569478365145
     ];
 
-    // ── State ─────────────────────────────────────────────────────────────────
-
     let watchID = null;
-    let currentStopAudio = null;
-    let isPlayingStop = false;   // prevents a new stop interrupting a playing one
-
-    // ── UI helpers ────────────────────────────────────────────────────────────
+    let tourRunning = false;
+    let playbackBlocked = false;
+    let activeStopIndex = null;
+    let playingBackground = false;
+    let backgroundPosition = 0;
+    let playbackVersion = 0;
+    const pendingStops = [];
 
     function setStatus(msg) {
         document.getElementById('statusText').textContent = msg;
     }
 
     function updateStopUI(index, state) {
-        // state: '' | 'active' | 'done'
         const li = document.querySelector(`#stopList li[data-index="${index}"]`);
         if (li) li.className = state;
     }
 
-    // ── Audio unlock (required by iOS/Android autoplay policies) ────────────────
-    //
-    // Mobile browsers only allow .play() to be called programmatically (e.g. from
-    // a GPS callback) if the audio element was already "unlocked" by a direct user
-    // gesture earlier. We prime every Audio() object here, inside the Start Tour
-    // click handler, so later GPS-triggered playback isn't blocked.
-
-    function unlockAudio() {
-        const allAudio = [backgroundTrack, ...stops.map(s => s.audio)];
-        allAudio.forEach(audio => {
-            // IMPORTANT: pause() must be called synchronously, in the same tick as
-            // play() — NOT inside a .then() callback. Waiting for the promise to
-            // resolve introduced a race condition where the pause fired late and
-            // stopped real playback that had started in the meantime (this was
-            // causing the "everything plays at once" / "background dies after a
-            // checkpoint" bugs).
-            audio.play().catch(() => {
-                // Ignore rejections here — this call is only for unlocking.
-            });
-            audio.pause();
-            audio.currentTime = 0;
-        });
+    function setButtons(canStart, canPause) {
+        document.getElementById('startBtn').disabled = !canStart;
+        document.getElementById('stopBtn').disabled = !canPause;
     }
 
-    // ── Background music fade / ducking ─────────────────────────────────────────
-
-    function fadeVolume(audio, targetVolume, duration) {
-        const startVolume = audio.volume;
-        const startTime = performance.now();
-
-        function step(now) {
-            const elapsed = now - startTime;
-            const progress = Math.min(elapsed / duration, 1);
-            audio.volume = startVolume + (targetVolume - startVolume) * progress;
-            if (progress < 1) {
-                requestAnimationFrame(step);
-            }
+    function saveBackgroundPosition() {
+        if (playingBackground && Number.isFinite(tourAudio.currentTime)) {
+            backgroundPosition = tourAudio.currentTime;
         }
-        requestAnimationFrame(step);
     }
 
-    function duckBackground() {
-        fadeVolume(backgroundTrack, DUCK_VOLUME, FADE_MS);
+    function playbackFailed(error, version) {
+        if (version !== playbackVersion || playbackBlocked) return;
+        ++playbackVersion; // ignore a late rejection from an interrupted play()
+        console.error('Tour playback failed:', error);
+        tourAudio.pause();
+        playbackBlocked = true;
+        if (activeStopIndex !== null) {
+            const index = activeStopIndex;
+            stops[index].played = false;
+            updateStopUI(index, '');
+            pendingStops.unshift(index);
+            activeStopIndex = null;
+            setStatus(`Couldn't play ${stops[index].name} – tap Start Tour to retry`);
+        } else {
+            setStatus("Couldn't play background music – tap Start Tour to retry");
+        }
+        setButtons(true, true);
     }
 
-    function restoreBackground() {
-        fadeVolume(backgroundTrack, NORMAL_VOLUME, FADE_MS);
+    function changeSource(src, loop, position = 0) {
+        const version = ++playbackVersion;
+        tourAudio.pause();
+        tourAudio.onloadedmetadata = null;
+        tourAudio.onerror = null;
+        tourAudio.onended = null;
+        tourAudio.loop = loop;
+        tourAudio.src = src;
+        tourAudio.onloadedmetadata = () => {
+            if (version !== playbackVersion || !position) return;
+            if (Number.isFinite(tourAudio.duration) && position < tourAudio.duration) {
+                tourAudio.currentTime = position;
+            }
+        };
+        tourAudio.onerror = () => playbackFailed(tourAudio.error, version);
+        tourAudio.onended = () => {
+            if (version !== playbackVersion || activeStopIndex === null || !tourAudio.ended) return;
+            updateStopUI(activeStopIndex, 'done');
+            activeStopIndex = null;
+            if (pendingStops.length) playNextStop();
+            else if (tourRunning) playBackground();
+            else {
+                setStatus('Tour not started');
+                setButtons(true, false);
+            }
+        };
+        tourAudio.load();
+        // Keep play() synchronous with Start/manual taps. Never prime by calling
+        // pause() immediately afterward: that can abort playback before it starts.
+        tourAudio.play().then(() => {
+            if (version !== playbackVersion) return;
+            if (activeStopIndex !== null) {
+                stops[activeStopIndex].played = true;
+                updateStopUI(activeStopIndex, 'active');
+                setStatus(`Playing: ${stops[activeStopIndex].name}`);
+            } else {
+                setStatus('Background music playing...');
+            }
+        }).catch(error => playbackFailed(error, version));
     }
 
-    // ── Tour control ──────────────────────────────────────────────────────────
+    function playBackground() {
+        playingBackground = true;
+        setStatus('Loading background music...');
+        changeSource(BACKGROUND_SRC, true, backgroundPosition);
+    }
+
+    function playNextStop() {
+        if (playbackBlocked || activeStopIndex !== null || !pendingStops.length) return;
+        saveBackgroundPosition();
+        playingBackground = false;
+        activeStopIndex = pendingStops.shift();
+        setStatus(`Loading: ${stops[activeStopIndex].name}`);
+        changeSource(stops[activeStopIndex].src, false);
+    }
 
     document.getElementById('startBtn').addEventListener('click', startTour);
     document.getElementById('stopBtn').addEventListener('click', pauseTour);
 
     function startTour() {
         if (!navigator.geolocation) {
-            alert("Location services not available on this device.");
+            alert('Location services not available on this device.');
             return;
         }
-
-        // Must happen inside this click handler (a real user gesture) so that
-        // later programmatic play() calls from the GPS callback aren't blocked.
-        unlockAudio();
-
-        backgroundTrack.volume = NORMAL_VOLUME;
-        backgroundTrack.play().catch(err => {
-            console.error("Background playback blocked:", err);
-        });
-        setStatus("Background music playing...");
-
-        document.getElementById('startBtn').disabled = true;
-        document.getElementById('stopBtn').disabled = false;
-
-        watchID = navigator.geolocation.watchPosition(
-            onLocationUpdate,
-            onLocationError,
-            { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 }
-        );
-
-        console.log("Tour started");
+        tourRunning = true;
+        playbackBlocked = false;
+        setButtons(false, true);
+        // Both paths immediately call play() on the very same element.
+        if (activeStopIndex === null) {
+            if (pendingStops.length) playNextStop();
+            else playBackground();
+        }
+        if (watchID === null) {
+            watchID = navigator.geolocation.watchPosition(
+                onLocationUpdate, onLocationError,
+                { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 }
+            );
+        }
     }
 
     function pauseTour() {
+        tourRunning = false;
         if (watchID !== null) {
             navigator.geolocation.clearWatch(watchID);
             watchID = null;
         }
-        backgroundTrack.pause();
-        if (currentStopAudio) {
-            currentStopAudio.pause();
-            currentStopAudio.currentTime = 0;
-            currentStopAudio = null;
+        saveBackgroundPosition();
+        ++playbackVersion;
+        tourAudio.pause();
+        // Restart interrupted narration on Start, rather than losing this stop.
+        if (activeStopIndex !== null) {
+            stops[activeStopIndex].played = false;
+            updateStopUI(activeStopIndex, '');
+            pendingStops.unshift(activeStopIndex);
+            activeStopIndex = null;
         }
-        isPlayingStop = false;
-
-        setStatus("Tour paused");
-        document.getElementById('startBtn').disabled = false;
-        document.getElementById('stopBtn').disabled = true;
+        playbackBlocked = false;
+        setStatus('Tour paused');
+        setButtons(true, false);
     }
 
-    // ── Location callbacks ────────────────────────────────────────────────────
-
     function onLocationUpdate(position) {
-        const lat = position.coords.latitude;
-        const lon = position.coords.longitude;
-        const acc = position.coords.accuracy;
-
+        if (!tourRunning) return; // ignore callbacks delivered after clearWatch()
+        const { latitude: lat, longitude: lon, accuracy: acc } = position.coords;
         document.getElementById('gpsInfo').textContent =
             `GPS: ${lat.toFixed(6)}, ${lon.toFixed(6)}  ±${Math.round(acc)}m`;
-
         checkStops(lat, lon);
     }
 
     function onLocationError(err) {
-        console.warn("GPS error:", err.message);
-        setStatus("GPS error – retrying...");
+        if (!tourRunning) return;
+        console.warn('GPS error:', err.message);
+        if (!playbackBlocked) setStatus('GPS error – retrying...');
     }
-
-    // ── Stop checking ─────────────────────────────────────────────────────────
 
     function checkStops(lat, lon) {
-        if (isPlayingStop) return; // don't interfere while a stop is actively playing
-
-        // Re-arm any stop the tractor has fully left, so it can trigger again on
-        // the next loop. This is done per-stop and independently of the others,
-        // so missing one checkpoint on a given loop has no effect on the rest.
-        stops.forEach((stop, i) => {
-            if (stop.played) {
-                const dist = getDistance(lat, lon, stop.lat, stop.lon);
-                if (dist > stop.radius) {
-                    stop.played = false;
-                    updateStopUI(i, '');
-                }
+        // Keep watching during narration: queue checkpoints we pass so long
+        // recordings cannot make later stops disappear from the tour.
+        stops.forEach((stop, index) => {
+            const distance = getDistance(lat, lon, stop.lat, stop.lon);
+            if (stop.played && distance > stop.radius + REARM_MARGIN) {
+                stop.played = false;
+                if (index !== activeStopIndex) updateStopUI(index, '');
             }
+            if (index === activeStopIndex || pendingStops.includes(index)) return;
+            if (!stop.played && distance <= stop.radius) pendingStops.push(index);
         });
-
-        for (let i = 0; i < stops.length; i++) {
-            const stop = stops[i];
-            if (stop.played) continue;
-
-            const dist = getDistance(lat, lon, stop.lat, stop.lon);
-            if (dist <= stop.radius) {
-                playStop(stop, i);
-                return; // only trigger one stop at a time
-            }
-        }
+        playNextStop();
     }
-
-    // ── Audio playback ────────────────────────────────────────────────────────
-
-    function playStop(stop, index) {
-        stop.played = true;
-        isPlayingStop = true;
-
-        // Duck the background music instead of stopping it — it keeps playing
-        // quietly underneath the checkpoint audio.
-        duckBackground();
-
-        if (currentStopAudio) {
-            currentStopAudio.pause();
-            currentStopAudio.currentTime = 0;
-        }
-
-        currentStopAudio = stop.audio;
-        currentStopAudio.currentTime = 0;
-
-        currentStopAudio.play().catch(err => {
-            console.error("Checkpoint playback blocked:", err);
-            setStatus(`Couldn't play ${stop.name} – try the manual button`);
-            isPlayingStop = false;
-            restoreBackground();
-        });
-
-        setStatus(`Playing: ${stop.name}`);
-        updateStopUI(index, 'active');
-        console.log("Playing:", stop.name);
-
-        currentStopAudio.onended = () => {
-            currentStopAudio = null;
-            isPlayingStop = false;
-            updateStopUI(index, 'done');
-            restoreBackground();
-            setStatus("Background music playing...");
-            console.log(stop.name, "finished");
-        };
-    }
-
-    // ── Manual trigger (for testing / operator use) ───────────────────────────
 
     function manualPlay(index) {
-        if (isPlayingStop) {
-            if (currentStopAudio) {
-                currentStopAudio.pause();
-                currentStopAudio.currentTime = 0;
-                currentStopAudio = null;
-            }
-            isPlayingStop = false;
+        if (!stops[index]) return;
+        saveBackgroundPosition();
+        ++playbackVersion;
+        tourAudio.pause();
+        if (activeStopIndex !== null) {
+            stops[activeStopIndex].played = false;
+            updateStopUI(activeStopIndex, '');
+            activeStopIndex = null;
         }
-        playStop(stops[index], index);
+        // A manual selection overrides the current narration, but retains any
+        // other checkpoints already detected by GPS.
+        const queued = pendingStops.indexOf(index);
+        if (queued !== -1) pendingStops.splice(queued, 1);
+        pendingStops.unshift(index);
+        playbackBlocked = false;
+        setButtons(!tourRunning, true);
+        playNextStop();
     }
 
     // ── Haversine distance (metres) ───────────────────────────────────────────
